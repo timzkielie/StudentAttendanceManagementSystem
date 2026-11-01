@@ -127,14 +127,35 @@ class StudentsPage(tk.Frame):
         else:
             self.reset_form()
 
+    def reset_for_sign_out(self):
+        if self._search_job:
+            self.after_cancel(self._search_job)
+            self._search_job = None
+        self.search_entry.delete(0, "end")
+        self.course_filter.set(ALL_COURSES)
+        self.course_filter["values"] = [ALL_COURSES]
+        self.table.set_rows([])
+        self.count_label.configure(text="0 student(s)")
+        self.editing_id = None
+        for entry in self.entries.values():
+            entry.set("") if isinstance(entry, ttk.Combobox) else entry.delete(0, "end")
+        self.entries["course"]["values"] = []
+        self.entries["section"]["values"] = []
+        self.form_title.configure(text="Add a student")
+        self.save_button.configure(text="SAVE STUDENT")
+        self.clear_button.configure(text="CLEAR")
+
+    def _user_id(self):
+        return self.app.session.user["id"]
+
     def _refresh_sections(self):
         """Fill the SECTION drop-down with the sections that already exist in the chosen course."""
         course = self.entries["course"].get().strip().upper()
-        sections = [row["section"] for row in db.get_sections(course)] if course else []
+        sections = [row["section"] for row in db.get_sections(course, self._user_id())] if course else []
         self.entries["section"]["values"] = sections
 
     def _refresh_courses(self):
-        courses = db.get_course_names()
+        courses = db.get_course_names(self._user_id())
         self.entries["course"]["values"] = courses
         self.course_filter["values"] = [ALL_COURSES, *courses]
         if self.course_filter.get() not in (ALL_COURSES, *courses):
@@ -143,7 +164,7 @@ class StudentsPage(tk.Frame):
     def refresh_table(self):
         course = self.course_filter.get()
         students = db.list_students(
-            self.search_entry.get().strip(), None if course == ALL_COURSES else course
+            self.search_entry.get().strip(), None if course == ALL_COURSES else course, self._user_id()
         )
         self.table.set_rows(
             (s["student_id"], (s["student_id"], s["fullname"], s["course"], s["section"]), None)
@@ -181,7 +202,7 @@ class StudentsPage(tk.Frame):
         if not student_id:
             messagebox.showinfo("Edit student", "Select a student in the table first.", parent=self)
             return
-        student = db.get_student(student_id)
+        student = db.get_student(student_id, self._user_id())
         if student is None:
             self.app.toast("That student no longer exists.", "error")
             self.refresh_table()
@@ -220,14 +241,14 @@ class StudentsPage(tk.Frame):
             self._update(values)
 
     def _add(self, values):
-        if db.student_exists(values["student_id"]):
-            messagebox.showerror("Duplicate ID", f"Student ID {values['student_id']} already exists.", parent=self)
+        user_id = self._user_id()
+        if db.student_exists(values["student_id"], user_id):
+            messagebox.showerror("Duplicate ID", "Student ID already exists.", parent=self)
             return
-        created_by = self.app.session.user["id"] if self.app.session.user else None
         if not db.add_student(
-            values["student_id"], values["fullname"], values["course"], values["section"], created_by
+            values["student_id"], values["fullname"], values["course"], values["section"], user_id
         ):
-            messagebox.showerror("Could not save", "The student could not be saved.", parent=self)
+            messagebox.showerror("Duplicate ID", "Student ID already exists.", parent=self)
             return
         self.app.toast(f"Student added: {values['fullname']}")
         self._refresh_courses()
@@ -236,10 +257,11 @@ class StudentsPage(tk.Frame):
 
     def _update(self, values):
         result = db.update_student(
-            self.editing_id, values["student_id"], values["fullname"], values["course"], values["section"]
+            self.editing_id, values["student_id"], values["fullname"], values["course"], values["section"],
+            self._user_id(),
         )
         if result == "duplicate":
-            messagebox.showerror("Duplicate ID", f"Student ID {values['student_id']} already exists.", parent=self)
+            messagebox.showerror("Duplicate ID", "Student ID already exists.", parent=self)
             return
         if result == "missing":
             messagebox.showerror("Not found", "This student was deleted by someone else.", parent=self)
@@ -256,7 +278,8 @@ class StudentsPage(tk.Frame):
         if not student_id:
             messagebox.showinfo("Delete student", "Select a student in the table first.", parent=self)
             return
-        student = db.get_student(student_id)
+        user_id = self._user_id()
+        student = db.get_student(student_id, user_id)
         if student is None:
             self.refresh_table()
             return
@@ -268,7 +291,7 @@ class StudentsPage(tk.Frame):
             parent=self,
         ):
             return
-        db.delete_student(student_id)
+        db.delete_student(student_id, user_id)
         if self.editing_id == student_id:
             self.reset_form()
         self.app.toast("Student deleted.")

@@ -38,8 +38,8 @@ class AttendancePage(tk.Frame):
         self.pick_view = tk.Frame(self, bg=BACKGROUND)
         self.picker = ClassPicker(
             self.pick_view,
-            db.get_courses,
-            db.get_sections,
+            lambda: db.get_courses(self.app.session.user["id"]),
+            lambda course: db.get_sections(course, self.app.session.user["id"]),
             self.open_class,
             "Step 1: choose a course.",
         )
@@ -99,8 +99,26 @@ class AttendancePage(tk.Frame):
     # -- navigation --------------------------------------------------------
     def on_show(self):
         self.dirty = False
+        self._clear_class()
         self.picker.show_courses()
         self._show(self.pick_view)
+
+    def reset_for_sign_out(self):
+        self.dirty = False
+        self._clear_class()
+        self.picker.clear()
+        self._show(self.pick_view)
+
+    def _clear_class(self):
+        for widget in self.rows.inner.winfo_children():
+            widget.destroy()
+        self.toggles.clear()
+        self.names.clear()
+        self.course = self.section = None
+        self.class_label.configure(text="")
+        self.notice_label.configure(text="")
+        self.progress_label.configure(text="")
+        self.date_picker.set_date(date.today())
 
     def back(self):
         if self.dirty and not messagebox.askyesno(
@@ -114,7 +132,8 @@ class AttendancePage(tk.Frame):
     def open_class(self, course, section):
         self.course, self.section = course, section
         self.class_label.configure(text=f"{course}  ·  Section {section}")
-        students = db.get_students_in_class(course, section)
+        user_id = self.app.session.user["id"]
+        students = db.get_students_in_class(course, section, user_id)
         self.names = {s["student_id"]: s["fullname"] for s in students}
 
         for widget in self.rows.inner.winfo_children():
@@ -143,7 +162,9 @@ class AttendancePage(tk.Frame):
     # -- marking -----------------------------------------------------------
     def _load_saved(self, day):
         """Fill the toggles with whatever was already saved for this class and date."""
-        saved = db.get_class_attendance(self.course, self.section, day)
+        saved = db.get_class_attendance(
+            self.course, self.section, day, self.app.session.user["id"]
+        )
         for student_id, toggle in self.toggles.items():
             toggle.set(saved.get(student_id))
         self._loaded_date = day
@@ -201,7 +222,9 @@ class AttendancePage(tk.Frame):
             return
 
         records = [(sid, toggle.get()) for sid, toggle in self.toggles.items()]
-        db.save_attendance(records, day, datetime.now().time().replace(microsecond=0))
+        db.save_attendance(
+            records, day, datetime.now().time().replace(microsecond=0), self.app.session.user["id"]
+        )
         self.dirty = False
         self.app.toast(f"Attendance saved for {self.course} · Section {self.section} ({day:%b %d, %Y})")
         # Stay on this list and reload what was just saved from the database,

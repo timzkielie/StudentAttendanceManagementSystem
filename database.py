@@ -149,6 +149,14 @@ class DatabaseManager:
             cur.execute("SHOW INDEX FROM students WHERE Key_name = 'idx_students_class'")
             if not cur.fetchall():  # fetchall: this index has 2 rows (course, section) and every row must be read
                 cur.execute("CREATE INDEX idx_students_class ON students (course, section)")
+            cur.execute("SHOW INDEX FROM students WHERE Key_name = 'idx_students_user'")
+            if not cur.fetchall():
+                cur.execute("CREATE INDEX idx_students_user ON students (user_id)")
+            cur.execute("""
+                UPDATE students
+                SET user_id = (SELECT MIN(id) FROM users)
+                WHERE user_id IS NULL AND EXISTS (SELECT 1 FROM users)
+            """)
 
             # ON UPDATE CASCADE lets a student ID be edited without breaking the
             # attendance rows; ON DELETE CASCADE removes a student's attendance too.
@@ -209,60 +217,74 @@ class DatabaseManager:
     # ---------------------------------------------------------------------------
     # Students
     # ---------------------------------------------------------------------------
-    def student_exists(self, student_id):
+    def student_exists(self, student_id, user_id):
         with self.open_cursor() as cur:
-            cur.execute("SELECT 1 FROM students WHERE student_id = %s", (student_id,))
+            cur.execute(
+                "SELECT 1 FROM students WHERE student_id = %s AND user_id = %s",
+                (student_id, user_id),
+            )
             return cur.fetchone() is not None
 
 
-    def add_student(self, student_id, fullname, course, section, created_by=None):
+    def add_student(self, student_id, fullname, course, section, user_id):
         try:
             with self.open_cursor(commit=True) as cur:
                 cur.execute(
                     """INSERT INTO students (student_id, fullname, course, section, user_id)
                        VALUES (%s, %s, %s, %s, %s)""",
-                    (student_id, fullname, course, section, created_by),
+                    (student_id, fullname, course, section, user_id),
                 )
             return True
         except mysql.connector.IntegrityError:
             return False
 
 
-    def update_student(self, old_id, new_id, fullname, course, section):
+    def update_student(self, old_id, new_id, fullname, course, section, user_id):
         """Return 'ok', 'duplicate' (new ID already used) or 'missing'."""
         try:
             with self.open_cursor(commit=True) as cur:
                 cur.execute(
                     """UPDATE students
                        SET student_id = %s, fullname = %s, course = %s, section = %s
-                       WHERE student_id = %s""",
-                    (new_id, fullname, course, section, old_id),
+                       WHERE student_id = %s AND user_id = %s""",
+                    (new_id, fullname, course, section, old_id, user_id),
                 )
                 return "ok" if cur.rowcount else "missing"
         except mysql.connector.IntegrityError:
             return "duplicate"
 
 
-    def delete_student(self, student_id):
+    def delete_student(self, student_id, user_id):
         """Delete a student and all of their attendance in one transaction."""
         with self.open_cursor(commit=True) as cur:
-            cur.execute("DELETE FROM attendance WHERE student_id = %s", (student_id,))
-            cur.execute("DELETE FROM students WHERE student_id = %s", (student_id,))
+            cur.execute(
+                """DELETE FROM attendance
+                   WHERE student_id = %s
+                     AND student_id IN (
+                         SELECT student_id FROM students WHERE student_id = %s AND user_id = %s
+                     )""",
+                (student_id, student_id, user_id),
+            )
+            cur.execute(
+                "DELETE FROM students WHERE student_id = %s AND user_id = %s",
+                (student_id, user_id),
+            )
             return cur.rowcount > 0
 
 
-    def get_student(self, student_id):
+    def get_student(self, student_id, user_id):
         with self.open_cursor() as cur:
             cur.execute(
-                "SELECT student_id, fullname, course, section FROM students WHERE student_id = %s",
-                (student_id,),
+                """SELECT student_id, fullname, course, section FROM students
+                   WHERE student_id = %s AND user_id = %s""",
+                (student_id, user_id),
             )
             return cur.fetchone()
 
 
-    def list_students(self, search="", course=None):
+    def list_students(self, search, course, user_id):
         """Students filtered by name/ID text and/or course."""
-        conditions, parameters = [], []
+        conditions, parameters = ["user_id = %s"], [user_id]
         if search:
             conditions.append("(fullname LIKE %s OR student_id LIKE %s)")
             parameters += [self._like(search), self._like(search)]
@@ -279,46 +301,55 @@ class DatabaseManager:
             return cur.fetchall()
 
 
-    def get_courses(self):
+    def get_courses(self, user_id):
         with self.open_cursor() as cur:
             cur.execute("""
                 SELECT course, COUNT(*) AS total, COUNT(DISTINCT section) AS sections
-                FROM students GROUP BY course ORDER BY course
-            """)
+                FROM students WHERE user_id = %s GROUP BY course ORDER BY course
+            """, (user_id,))
             return cur.fetchall()
 
 
-    def get_course_names(self):
-        return [row["course"] for row in self.get_courses()]
+    def get_course_names(self, user_id):
+        return [row["course"] for row in self.get_courses(user_id)]
 
 
-    def get_sections(self, course):
+    def get_sections(self, course, user_id):
         with self.open_cursor() as cur:
             cur.execute(
                 """SELECT section, COUNT(*) AS total FROM students
-                   WHERE course = %s GROUP BY section ORDER BY section""",
-                (course,),
+                   WHERE course = %s AND user_id = %s GROUP BY section ORDER BY section""",
+                (course, user_id),
             )
             return cur.fetchall()
 
 
-    def get_students_in_class(self, course, section):
+    def get_students_in_class(self, course, section, user_id):
         with self.open_cursor() as cur:
             cur.execute(
                 """SELECT student_id, fullname FROM students
-                   WHERE course = %s AND section = %s ORDER BY fullname""",
-                (course, section),
+                   WHERE course = %s AND section = %s AND user_id = %s ORDER BY fullname""",
+                (course, section, user_id),
             )
             return cur.fetchall()
 
 
-    def get_overview(self):
+    def get_overview(self, user_id):
         """Totals for the dashboard cards."""
         with self.open_cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS students, COUNT(DISTINCT course) AS courses FROM students")
+            cur.execute(
+                """SELECT COUNT(*) AS students, COUNT(DISTINCT course) AS courses
+                   FROM students WHERE user_id = %s""",
+                (user_id,),
+            )
             totals = cur.fetchone()
             # A "section" only means something together with its course.
-            cur.execute("SELECT COUNT(*) AS sections FROM (SELECT 1 FROM students GROUP BY course, section) AS c")
+            cur.execute(
+                """SELECT COUNT(*) AS sections FROM (
+                       SELECT 1 FROM students WHERE user_id = %s GROUP BY course, section
+                   ) AS c""",
+                (user_id,),
+            )
             totals["sections"] = cur.fetchone()["sections"]
         return totals
 
@@ -326,19 +357,20 @@ class DatabaseManager:
     # ---------------------------------------------------------------------------
     # Attendance
     # ---------------------------------------------------------------------------
-    def get_class_attendance(self, course, section, att_date):
+    def get_class_attendance(self, course, section, att_date, user_id):
         """{student_id: status} already recorded for this class on this date."""
         with self.open_cursor() as cur:
             cur.execute(
                 """SELECT a.student_id, a.status
                    FROM attendance a JOIN students s ON s.student_id = a.student_id
-                   WHERE s.course = %s AND s.section = %s AND a.attendance_date = %s""",
-                (course, section, att_date),
+                   WHERE s.course = %s AND s.section = %s AND a.attendance_date = %s
+                     AND s.user_id = %s""",
+                (course, section, att_date, user_id),
             )
             return {row["student_id"]: row["status"] for row in cur.fetchall()}
 
 
-    def save_attendance(self, records, att_date, att_time):
+    def save_attendance(self, records, att_date, att_time, user_id):
         """Save [(student_id, status), ...] for one date. Existing marks are updated."""
         for _student_id, status in records:
             if status not in STATUSES:
@@ -347,31 +379,38 @@ class DatabaseManager:
             for student_id, status in records:
                 cur.execute(
                     """INSERT INTO attendance (student_id, status, attendance_date, attendance_time)
-                       VALUES (%s, %s, %s, %s)
+                       SELECT s.student_id, %s, %s, %s FROM students s
+                       WHERE s.student_id = %s AND s.user_id = %s
                        ON DUPLICATE KEY UPDATE
                            status = VALUES(status), attendance_time = VALUES(attendance_time)""",
-                    (student_id, status, att_date, att_time),
+                    (status, att_date, att_time, student_id, user_id),
                 )
 
 
-    def update_attendance_status(self, student_id, att_date, status):
+    def update_attendance_status(self, student_id, att_date, status, user_id):
         if status not in STATUSES:
             raise ValueError(f"Invalid attendance status: {status!r}")
         with self.open_cursor(commit=True) as cur:
             cur.execute(
-                "UPDATE attendance SET status = %s WHERE student_id = %s AND attendance_date = %s",
-                (status, student_id, att_date),
+                """UPDATE attendance SET status = %s
+                   WHERE student_id = %s AND attendance_date = %s
+                     AND student_id IN (
+                         SELECT student_id FROM students WHERE user_id = %s
+                     )""",
+                (status, student_id, att_date, user_id),
             )
             return cur.rowcount > 0
 
 
-    def get_attendance_counts(self, att_date):
-        """{'PRESENT': n, 'LATE': n, 'ABSENT': n} for one day, school-wide."""
+    def get_attendance_counts(self, att_date, user_id):
+        """{'PRESENT': n, 'LATE': n, 'ABSENT': n} for one user's records on one day."""
         counts = dict.fromkeys(STATUSES, 0)
         with self.open_cursor() as cur:
             cur.execute(
-                "SELECT status, COUNT(*) AS total FROM attendance WHERE attendance_date = %s GROUP BY status",
-                (att_date,),
+                """SELECT a.status, COUNT(*) AS total FROM attendance a
+                   JOIN students s ON s.student_id = a.student_id
+                   WHERE a.attendance_date = %s AND s.user_id = %s GROUP BY a.status""",
+                (att_date, user_id),
             )
             for row in cur.fetchall():
                 if row["status"] in counts:
@@ -385,45 +424,50 @@ class DatabaseManager:
         return row
 
 
-    def get_class_summary(self, course, section):
+    def get_class_summary(self, course, section, user_id):
         """One row per student with PRESENT / LATE / ABSENT totals."""
         with self.open_cursor() as cur:
             cur.execute(
                 f"""SELECT s.student_id, s.fullname, {_COUNT_COLUMNS}
                     FROM students s LEFT JOIN attendance a ON a.student_id = s.student_id
-                    WHERE s.course = %s AND s.section = %s
+                    WHERE s.course = %s AND s.section = %s AND s.user_id = %s
                     GROUP BY s.student_id, s.fullname ORDER BY s.fullname""",
-                (course, section),
+                (course, section, user_id),
             )
             return [self._as_ints(row) for row in cur.fetchall()]
 
 
-    def get_student_counts(self, student_id):
+    def get_student_counts(self, student_id, user_id):
         with self.open_cursor() as cur:
             cur.execute(
-                f"SELECT {_COUNT_COLUMNS} FROM attendance a WHERE a.student_id = %s",
-                (student_id,),
+                f"""SELECT {_COUNT_COLUMNS} FROM attendance a
+                    JOIN students s ON s.student_id = a.student_id
+                    WHERE a.student_id = %s AND s.user_id = %s""",
+                (student_id, user_id),
             )
             return self._as_ints(cur.fetchone())
 
 
-    def get_student_history(self, student_id):
+    def get_student_history(self, student_id, user_id):
         with self.open_cursor() as cur:
             cur.execute(
-                """SELECT attendance_date, attendance_time, status FROM attendance
-                   WHERE student_id = %s ORDER BY attendance_date DESC""",
-                (student_id,),
+                """SELECT a.attendance_date, a.attendance_time, a.status FROM attendance a
+                   JOIN students s ON s.student_id = a.student_id
+                   WHERE a.student_id = %s AND s.user_id = %s
+                   ORDER BY a.attendance_date DESC""",
+                (student_id, user_id),
             )
             return cur.fetchall()
 
 
-    def get_attendance_by_date(self, att_date):
+    def get_attendance_by_date(self, att_date, user_id):
         with self.open_cursor() as cur:
             cur.execute(
                 """SELECT s.student_id, s.fullname, s.course, s.section,
                           a.status, a.attendance_time
                    FROM attendance a JOIN students s ON s.student_id = a.student_id
-                   WHERE a.attendance_date = %s ORDER BY s.course, s.section, s.fullname""",
-                (att_date,),
+                   WHERE a.attendance_date = %s AND s.user_id = %s
+                   ORDER BY s.course, s.section, s.fullname""",
+                (att_date, user_id),
             )
             return cur.fetchall()

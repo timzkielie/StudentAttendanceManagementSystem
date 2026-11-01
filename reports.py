@@ -67,7 +67,9 @@ def open_status_dialog(app, student_id, fullname, att_date, current, on_saved):
 
     def save():
         status = toggle.get()
-        if status != current and not db.update_attendance_status(student_id, att_date, status):
+        if status != current and not db.update_attendance_status(
+            student_id, att_date, status, app.session.user["id"]
+        ):
             messagebox.showerror("Update failed", "That attendance record no longer exists.", parent=window)
             return
         window.destroy()
@@ -123,6 +125,19 @@ class ReportsPage(tk.Frame):
         if date is not None:
             self.report_date = date
         self.select_tab(tab)
+
+    def reset_for_sign_out(self):
+        if self._search_job:
+            self.after_cancel(self._search_job)
+            self._search_job = None
+        self._stack.clear()
+        self._current = None
+        self._search_text = ""
+        self.report_date = date.today()
+        self._date_records = {}
+        for widget in self.body.winfo_children():
+            widget.destroy()
+        self._set_export(None)
 
     def select_tab(self, tab):
         self.tab = tab
@@ -197,8 +212,8 @@ class ReportsPage(tk.Frame):
     def view_classes(self):
         picker = ClassPicker(
             self.body,
-            db.get_courses,
-            db.get_sections,
+            lambda: db.get_courses(self.app.session.user["id"]),
+            lambda course: db.get_sections(course, self.app.session.user["id"]),
             lambda course, section: self.navigate(self.view_class_report, course, section),
             "Choose a course to see its sections.",
         )
@@ -206,7 +221,7 @@ class ReportsPage(tk.Frame):
         picker.show_courses()
 
     def view_class_report(self, course, section):
-        summary = db.get_class_summary(course, section)
+        summary = db.get_class_summary(course, section, self.app.session.user["id"])
         actions = self._toolbar(f"{course}  ·  Section {section}", f"{len(summary)} student(s)", back=True)
         table = DataTable(
             self.body,
@@ -268,7 +283,7 @@ class ReportsPage(tk.Frame):
 
     def _load_date(self, day):
         self.report_date = day
-        records = db.get_attendance_by_date(day)
+        records = db.get_attendance_by_date(day, self.app.session.user["id"])
         self._date_records = {r["student_id"]: r for r in records}
         counts = {s: sum(1 for r in records if r["status"] == s) for s in database.STATUSES}
         self.date_summary.configure(
@@ -335,7 +350,7 @@ class ReportsPage(tk.Frame):
             self.find_table.set_empty_text("Type a name or student ID to search.")
             self.find_table.set_rows([])
             return
-        students = db.list_students(self._search_text)
+        students = db.list_students(self._search_text, None, self.app.session.user["id"])
         self.find_table.set_empty_text("No students match your search.")
         self.find_table.set_rows(
             (s["student_id"], (s["student_id"], s["fullname"], s["course"], s["section"]), None) for s in students
@@ -343,13 +358,14 @@ class ReportsPage(tk.Frame):
 
     # -- view: ONE STUDENT ---------------------------------------------------
     def view_student(self, student_id):
-        student = db.get_student(student_id)
+        user_id = self.app.session.user["id"]
+        student = db.get_student(student_id, user_id)
         if student is None:
             self.app.toast("That student no longer exists.", "error")
             self.back()
             return
-        counts = db.get_student_counts(student_id)
-        history = db.get_student_history(student_id)
+        counts = db.get_student_counts(student_id, user_id)
+        history = db.get_student_history(student_id, user_id)
 
         actions = self._toolbar(
             student["fullname"],

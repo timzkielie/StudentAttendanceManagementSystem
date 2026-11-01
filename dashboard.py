@@ -112,13 +112,14 @@ class DashboardPage(tk.Frame):
     def on_show(self):
         user = self.app.session.user
         self.header.title_label.configure(text=f"Welcome, {user['username'] if user else 'User'}")
+        user_id = user["id"]
 
-        totals = db.get_overview()
+        totals = db.get_overview(user_id)
         for key, card in self.overview.items():
             card.value_label.configure(text=str(totals[key]))
 
         today = date.today()
-        counts = db.get_attendance_counts(today)
+        counts = db.get_attendance_counts(today, user_id)
         self.today_title.configure(text=f"TODAY  ·  {today:%b %d, %Y}".upper())
         for status, value in counts.items():
             self.today[status].value_label.configure(text=str(value))

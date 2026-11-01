@@ -486,6 +486,12 @@ class ClassPicker(tk.Frame):
         else:
             self.show_courses()
 
+    def clear(self):
+        self.course = None
+        self._set_crumbs()
+        for widget in self._cards.winfo_children():
+            widget.destroy()
+
     def show_courses(self):
         self.course = None
         self._set_crumbs()

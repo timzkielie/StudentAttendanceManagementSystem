@@ -111,6 +111,10 @@ class App(tk.Tk):
     def sign_out(self):
         self.session.user = None
         self.current_page = None
+        for page in self.pages.values():
+            reset = getattr(page, "reset_for_sign_out", None)
+            if reset:
+                reset()
         self.show_auth("login")
 
     # -- main application shell ---------------------------------------------

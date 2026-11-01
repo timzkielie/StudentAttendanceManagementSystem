@@ -28,4 +28,38 @@ XAMPP defaults are used (user `root`, empty password). To change them set
 
 ## Upgrading an older database
 On first start the app converts old `P / L / A` marks to `PRESENT / LATE / ABSENT`
-and adds a missing `course` column. No data is lost.
+adds a missing `course` column, indexes `students.user_id`, and assigns students
+with a `NULL` owner to the oldest registered user. No data is lost.
+
+## 1.4 User workspaces
+Each user sees only the students they created. Their course and section lists,
+attendance, dashboard totals, and reports are scoped to that same ownership.
+Student IDs remain globally unique, and duplicate-ID messages do not reveal
+which account owns an existing ID.
+
+## 2.6 Student ownership
+`students.user_id` identifies the account that owns a student. The column is
+indexed, and all student and attendance reads and changes are restricted to
+that owner. Attendance is associated with its owner through the student record.
+
+### Students data dictionary
+| Column | Meaning |
+|---|---|
+| `student_id` | Globally unique student identifier |
+| `fullname` | Student's full name |
+| `course` | Course name |
+| `section` | Section within the course |
+| `user_id` | Owning account ID; indexed and used to enforce workspace isolation |
+
+## 3.4 Data isolation per user
+Every registered account has a separate workspace. Users can view or change
+only their own students and the attendance records associated with those
+students. Existing unowned records are migrated to the oldest account when the
+application starts.
+
+### Manual test cases
+1. **Register new user -> Dashboard shows 0 students and Students list is empty.**
+2. **User B cannot see User A's students.**
+3. Register user 2 and confirm Dashboard, Students, Mark Attendance, and Reports
+   are empty. Add a student as user 2, sign out, then sign back in as user 1 and
+   confirm user 2's student is not visible.

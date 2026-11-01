@@ -62,12 +62,12 @@ class TestStatusValidation(unittest.TestCase):
     def test_save_attendance_rejects_unknown_status(self):
         with self.assertRaises(ValueError):
             database.DatabaseManager().save_attendance(
-                [("A1", "EXCUSED")], date.today(), None
+                [("A1", "EXCUSED")], date.today(), None, 1
             )
 
     def test_update_status_rejects_unknown_status(self):
         with self.assertRaises(ValueError):
-            database.DatabaseManager().update_attendance_status("A1", date.today(), "P")
+            database.DatabaseManager().update_attendance_status("A1", date.today(), "P", 1)
 
 
 if __name__ == "__main__":
