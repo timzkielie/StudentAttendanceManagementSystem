@@ -5,12 +5,27 @@ double-clicking a row) loads that student into the form; saving then updates
 them instead of creating a new one.
 """
 import re
+import csv
 import tkinter as tk
-from tkinter import messagebox, ttk
+import zipfile
+from tkinter import filedialog, messagebox, ttk
+
+import mysql.connector
+from openpyxl import Workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from database import DatabaseManager
 from assets.theme import COLORS, font
 from assets.widgets import AppButton, DataTable, field_label, make_entry, page_header
+from student_import import (
+    FIELD_LABELS,
+    IGNORE_FIELD,
+    StudentFileError,
+    assess_rows,
+    import_template_rows,
+    read_student_file,
+    suggested_mapping,
+)
 
 
 db = DatabaseManager()  # always the same shared instance (Singleton)
@@ -78,6 +93,18 @@ class StudentsPage(tk.Frame):
         self.save_button.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.clear_button = AppButton(buttons, "CLEAR", self.reset_form, "secondary", large=True)
         self.clear_button.pack(side="left")
+
+        AppButton(form, "UPLOAD STUDENT LIST", self.upload_student_list, "primary").pack(
+            fill="x", pady=(14, 8)
+        )
+        template_buttons = tk.Frame(form, bg=SURFACE)
+        template_buttons.pack(fill="x")
+        AppButton(
+            template_buttons, "EXCEL TEMPLATE", lambda: self.save_template("xlsx"), "secondary"
+        ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        AppButton(
+            template_buttons, "CSV TEMPLATE", lambda: self.save_template("csv"), "secondary"
+        ).pack(side="left", fill="x", expand=True, padx=(4, 0))
 
     def _build_table(self, body):
         panel = tk.Frame(body, bg=BACKGROUND)
@@ -177,6 +204,293 @@ class StudentsPage(tk.Frame):
         if self._search_job:
             self.after_cancel(self._search_job)
         self._search_job = self.after(250, self.refresh_table)
+
+    # -- bulk import -------------------------------------------------------
+    def save_template(self, file_type):
+        """Create a sample student list in the requested format."""
+        extension = ".xlsx" if file_type == "xlsx" else ".csv"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save student list template",
+            defaultextension=extension,
+            filetypes=[("Excel workbook", "*.xlsx")] if file_type == "xlsx"
+            else [("CSV file", "*.csv")],
+            initialfile=f"student_list_template{extension}",
+        )
+        if not path:
+            return
+        headers, sample = import_template_rows()
+        try:
+            if file_type == "xlsx":
+                workbook = Workbook()
+                worksheet = workbook.active
+                worksheet.title = "Students"
+                worksheet.append(headers)
+                worksheet.append(sample)
+                workbook.save(path)
+            else:
+                with open(path, "w", newline="", encoding="utf-8-sig") as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(headers)
+                    writer.writerow(sample)
+        except (OSError, PermissionError) as error:
+            messagebox.showerror("Template could not be saved", str(error), parent=self)
+            return
+        self.app.toast("Student list template saved.")
+
+    def upload_student_list(self):
+        """Select a file, detect its columns, and open the review-before-import dialog."""
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="Choose a student list",
+            filetypes=[
+                ("Student lists", "*.xlsx *.csv"),
+                ("Excel workbook", "*.xlsx"),
+                ("CSV file", "*.csv"),
+            ],
+        )
+        if not path:
+            return
+        try:
+            headers, rows = read_student_file(path)
+        except (
+            StudentFileError, OSError, ValueError, zipfile.BadZipFile, InvalidFileException,
+        ) as error:
+            messagebox.showerror("Unable to read student list", str(error), parent=self)
+            return
+        self._show_import_preview(path, headers, rows)
+
+    def _show_import_preview(self, path, headers, rows):
+        window = tk.Toplevel(self)
+        window.title("Upload Student List")
+        window.configure(bg=BACKGROUND)
+        window.geometry("1100x760")
+        window.minsize(850, 580)
+        window.transient(self.winfo_toplevel())
+        window.grab_set()
+        self._import_window = window
+        self._import_headers = headers
+        self._import_rows = rows
+        self._import_mapping = suggested_mapping(headers)
+        self._import_results = []
+
+        content = tk.Frame(window, bg=BACKGROUND, padx=20, pady=16)
+        content.pack(fill="both", expand=True)
+        tk.Label(
+            content, text="Review student list", font=font(18, "bold"),
+            bg=BACKGROUND, fg=COLORS["text"],
+        ).pack(anchor="w")
+        tk.Label(
+            content, text=f"Selected file: {path}", font=font(9),
+            bg=BACKGROUND, fg=COLORS["text_secondary"], anchor="w",
+        ).pack(fill="x", pady=(3, 10))
+        tk.Label(
+            content,
+            text="Double-click a recognized field to change its mapping. Unneeded columns can be set to Ignore.",
+            font=font(9), bg=BACKGROUND, fg=COLORS["text_muted"], anchor="w",
+        ).pack(fill="x", pady=(0, 5))
+
+        mapping_frame = tk.Frame(content, bg=BACKGROUND)
+        mapping_frame.pack(fill="x")
+        self.mapping_table = ttk.Treeview(
+            mapping_frame, columns=("uploaded", "recognized"), show="headings",
+            height=min(6, max(2, len(headers))),
+        )
+        self.mapping_table.heading("uploaded", text="Uploaded File Column")
+        self.mapping_table.heading("recognized", text="Recognized Student Information Field")
+        self.mapping_table.column("uploaded", width=360, anchor="w")
+        self.mapping_table.column("recognized", width=360, anchor="w")
+        mapping_scroll = ttk.Scrollbar(
+            mapping_frame, orient="vertical", command=self.mapping_table.yview
+        )
+        self.mapping_table.configure(yscrollcommand=mapping_scroll.set)
+        self.mapping_table.pack(side="left", fill="x", expand=True)
+        mapping_scroll.pack(side="right", fill="y")
+        self._mapping_items = {}
+        self._populate_mapping_table()
+        self.mapping_table.bind("<Double-1>", self._edit_column_mapping)
+
+        self.import_summary = tk.Label(
+            content, text="", font=font(9, "bold"), bg=BACKGROUND,
+            fg=COLORS["text_secondary"], justify="left", anchor="w",
+        )
+        self.import_summary.pack(fill="x", pady=(10, 8))
+
+        preview_frame = tk.Frame(content, bg=BACKGROUND)
+        preview_frame.pack(fill="both", expand=True)
+        preview_columns = [f"file_{index}" for index in range(len(headers))]
+        self.preview_columns = preview_columns
+        self.preview_table = ttk.Treeview(
+            preview_frame,
+            columns=(*preview_columns, "status", "details"),
+            show="headings",
+        )
+        for column, header in zip(preview_columns, headers):
+            self.preview_table.heading(column, text=header)
+            self.preview_table.column(column, width=125, minwidth=85, stretch=False)
+        self.preview_table.heading("status", text="Import Status")
+        self.preview_table.column("status", width=180, minwidth=155, stretch=False)
+        self.preview_table.heading("details", text="Validation Details")
+        self.preview_table.column("details", width=330, minwidth=220, stretch=True)
+        vertical_scroll = ttk.Scrollbar(
+            preview_frame, orient="vertical", command=self.preview_table.yview
+        )
+        horizontal_scroll = ttk.Scrollbar(
+            preview_frame, orient="horizontal", command=self.preview_table.xview
+        )
+        self.preview_table.configure(
+            yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set
+        )
+        self.preview_table.grid(row=0, column=0, sticky="nsew")
+        vertical_scroll.grid(row=0, column=1, sticky="ns")
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
+        preview_frame.grid_rowconfigure(0, weight=1)
+        preview_frame.grid_columnconfigure(0, weight=1)
+
+        buttons = tk.Frame(content, bg=BACKGROUND)
+        buttons.pack(fill="x", pady=(12, 0))
+        self.confirm_import_button = AppButton(
+            buttons, "CONFIRM IMPORT", self.confirm_student_import, "success"
+        )
+        self.confirm_import_button.pack(side="right")
+        AppButton(
+            buttons, "CANCEL", window.destroy, "secondary"
+        ).pack(side="right", padx=(0, 8))
+        self._refresh_import_preview()
+
+    def _populate_mapping_table(self):
+        for item in self.mapping_table.get_children():
+            self.mapping_table.delete(item)
+        self._mapping_items.clear()
+        for index, header in enumerate(self._import_headers):
+            item = f"column-{index}"
+            field = self._import_mapping[header]
+            label = FIELD_LABELS.get(field, IGNORE_FIELD)
+            self.mapping_table.insert("", "end", iid=item, values=(header, label))
+            self._mapping_items[item] = header
+
+    def _edit_column_mapping(self, event):
+        region = self.mapping_table.identify("region", event.x, event.y)
+        column = self.mapping_table.identify_column(event.x)
+        item = self.mapping_table.identify_row(event.y)
+        if region != "cell" or column != "#2" or not item:
+            return
+        bounds = self.mapping_table.bbox(item, column)
+        if not bounds:
+            return
+        if getattr(self, "_mapping_editor", None):
+            self._mapping_editor.destroy()
+        header = self._mapping_items[item]
+        current = self._import_mapping[header]
+        choices = [*FIELD_LABELS.values(), IGNORE_FIELD]
+        editor = ttk.Combobox(self.mapping_table, values=choices, state="readonly")
+        editor.set(FIELD_LABELS.get(current, IGNORE_FIELD))
+        editor.place(x=bounds[0], y=bounds[1], width=bounds[2], height=bounds[3])
+        self._mapping_editor = editor
+
+        def finish(_event=None):
+            selected = editor.get()
+            reverse_labels = {label: field for field, label in FIELD_LABELS.items()}
+            self._import_mapping[header] = reverse_labels.get(selected, IGNORE_FIELD)
+            editor.destroy()
+            self._mapping_editor = None
+            self._populate_mapping_table()
+            self._refresh_import_preview()
+
+        def cancel(_event=None):
+            editor.destroy()
+            self._mapping_editor = None
+
+        editor.bind("<<ComboboxSelected>>", finish)
+        editor.bind("<Escape>", cancel)
+        editor.focus_set()
+
+    def _refresh_import_preview(self):
+        mapped_id_headers = [
+            header for header, field in self._import_mapping.items() if field == "student_id"
+        ]
+        student_ids = [
+            str(row.get(mapped_id_headers[0], "")).strip()
+            for row in self._import_rows
+            if mapped_id_headers and str(row.get(mapped_id_headers[0], "")).strip()
+        ]
+        existing_ids = db.get_existing_student_ids(student_ids)
+        self._import_results = assess_rows(
+            self._import_rows, self._import_mapping, existing_ids
+        )
+        for item in self.preview_table.get_children():
+            self.preview_table.delete(item)
+
+        counts = {"VALID": 0, "DUPLICATE": 0, "INVALID": 0}
+        for result in self._import_results:
+            counts[result["status"]] += 1
+            values = [result["raw"].get(header, "") for header in self._import_headers]
+            status = {
+                "VALID": "VALID - Ready to Import",
+                "DUPLICATE": "DUPLICATE - Student ID already exists",
+                "INVALID": "INVALID - Missing or incorrect information",
+            }[result["status"]]
+            self.preview_table.insert(
+                "", "end",
+                values=(*values, status, "; ".join(result["errors"])),
+            )
+
+        recognized = [
+            header for header, field in self._import_mapping.items() if field != IGNORE_FIELD
+        ]
+        unrecognized = [
+            header for header, field in self._import_mapping.items() if field == IGNORE_FIELD
+        ]
+        unrecognized_text = ", ".join(unrecognized) if unrecognized else "None"
+        self.import_summary.configure(
+            text=(
+                f"Total Records Found: {len(self._import_results)}    "
+                f"Valid Records: {counts['VALID']}    "
+                f"Duplicate Records: {counts['DUPLICATE']}    "
+                f"Invalid Records: {counts['INVALID']}\n"
+                f"Detected Columns: {len(recognized)}    "
+                f"Unrecognized Columns: {unrecognized_text}"
+            )
+        )
+        self.confirm_import_button.set_enabled(counts["VALID"] > 0)
+
+    def confirm_student_import(self):
+        records = [
+            result["values"] for result in self._import_results
+            if result["status"] == "VALID"
+        ]
+        if not records:
+            messagebox.showinfo(
+                "Nothing to import", "There are no valid student records to import.",
+                parent=self._import_window,
+            )
+            return
+        try:
+            imported, newly_duplicated = db.add_students_bulk(records, self._user_id())
+        except mysql.connector.Error as error:
+            messagebox.showerror(
+                "Import failed", f"No student records were saved.\n\n{error}",
+                parent=self._import_window,
+            )
+            return
+
+        duplicate_count = sum(
+            result["status"] == "DUPLICATE" for result in self._import_results
+        ) + newly_duplicated
+        invalid_count = sum(
+            result["status"] == "INVALID" for result in self._import_results
+        )
+        self._refresh_courses()
+        self.refresh_table()
+        messagebox.showinfo(
+            "Student Import Completed!",
+            "Student Import Completed!\n\n"
+            f"Successfully Imported: {imported}\n"
+            f"Skipped Duplicates: {duplicate_count}\n"
+            f"Invalid Records: {invalid_count}",
+            parent=self._import_window,
+        )
+        self._import_window.destroy()
 
     # -- form --------------------------------------------------------------
     def _set(self, key, value):

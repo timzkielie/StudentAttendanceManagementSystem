@@ -146,6 +146,7 @@ class DatabaseManager:
                 cur.execute(
                     "ALTER TABLE students ADD COLUMN course VARCHAR(255) NOT NULL DEFAULT 'Unassigned'"
                 )
+            self._ensure_student_profile_columns(cur)
             cur.execute("SHOW INDEX FROM students WHERE Key_name = 'idx_students_class'")
             if not cur.fetchall():  # fetchall: this index has 2 rows (course, section) and every row must be read
                 cur.execute("CREATE INDEX idx_students_class ON students (course, section)")
@@ -186,6 +187,26 @@ class DatabaseManager:
         for old, new in _LEGACY_STATUSES.items():
             cur.execute("UPDATE attendance SET status = %s WHERE status = %s", (new, old))
 
+    @staticmethod
+    def _ensure_student_profile_columns(cur):
+        """Add nullable profile fields used by flexible imports without changing old data."""
+        columns = {
+            "email": "VARCHAR(255) NULL",
+            "mobile_number": "VARCHAR(50) NULL",
+            "age": "SMALLINT UNSIGNED NULL",
+            "birth_date": "DATE NULL",
+            "gender": "VARCHAR(50) NULL",
+            "year_level": "VARCHAR(50) NULL",
+            "modality": "VARCHAR(100) NULL",
+            "address": "TEXT NULL",
+            "guardian_name": "VARCHAR(255) NULL",
+            "guardian_contact_number": "VARCHAR(50) NULL",
+        }
+        for name, definition in columns.items():
+            cur.execute("SHOW COLUMNS FROM students LIKE %s", (name,))
+            if not cur.fetchall():
+                cur.execute(f"ALTER TABLE students ADD COLUMN {name} {definition}")
+
 
     # ---------------------------------------------------------------------------
     # Users
@@ -224,6 +245,66 @@ class DatabaseManager:
                 (student_id, user_id),
             )
             return cur.fetchone() is not None
+
+
+    def get_existing_student_ids(self, student_ids):
+        """Return globally existing IDs; student IDs are globally unique across workspaces."""
+        unique_ids = list(dict.fromkeys(student_ids))
+        existing = set()
+        for start in range(0, len(unique_ids), 500):
+            batch = unique_ids[start:start + 500]
+            if not batch:
+                continue
+            placeholders = ", ".join(["%s"] * len(batch))
+            with self.open_cursor() as cur:
+                cur.execute(
+                    f"SELECT student_id FROM students WHERE student_id IN ({placeholders})",
+                    batch,
+                )
+                existing.update(row["student_id"] for row in cur.fetchall())
+        return existing
+
+
+    def add_students_bulk(self, records, user_id):
+        """Insert valid student records atomically; return (inserted, existing duplicates)."""
+        if not records:
+            return 0, 0
+
+        student_ids = list(dict.fromkeys(record["student_id"] for record in records))
+        columns = (
+            "student_id", "fullname", "course", "section", "user_id", "email",
+            "mobile_number", "age", "birth_date", "gender", "year_level", "modality",
+            "address", "guardian_name", "guardian_contact_number",
+        )
+        column_sql = ", ".join(columns)
+        value_sql = ", ".join(["%s"] * len(columns))
+        inserted = 0
+        duplicate_count = 0
+        with self.open_cursor(commit=True) as cur:
+            existing = set()
+            for start in range(0, len(student_ids), 500):
+                batch = student_ids[start:start + 500]
+                placeholders = ", ".join(["%s"] * len(batch))
+                cur.execute(
+                    f"SELECT student_id FROM students WHERE student_id IN ({placeholders})",
+                    batch,
+                )
+                existing.update(row["student_id"] for row in cur.fetchall())
+
+            existing_keys = {student_id.casefold() for student_id in existing}
+            for record in records:
+                if record["student_id"].casefold() in existing_keys:
+                    duplicate_count += 1
+                    continue
+                values = [record.get(column) for column in columns]
+                values[4] = user_id
+                cur.execute(
+                    f"INSERT INTO students ({column_sql}) VALUES ({value_sql})",
+                    values,
+                )
+                inserted += 1
+                existing_keys.add(record["student_id"].casefold())
+        return inserted, duplicate_count
 
 
     def add_student(self, student_id, fullname, course, section, user_id):

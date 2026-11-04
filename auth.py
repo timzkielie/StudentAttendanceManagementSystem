@@ -5,6 +5,7 @@ Part 2 (bottom): the two screens that use those rules.
 """
 import hashlib
 import hmac
+import re
 import secrets
 import tkinter as tk
 
@@ -24,10 +25,26 @@ MIN_PASSWORD_LENGTH = 6
 _ALGORITHM = "pbkdf2_sha256"
 _ITERATIONS = 310_000
 _INVALID_LOGIN = "Invalid username or password."
+_PASSWORD_PATTERN = re.compile(r"[A-Za-z0-9]+\Z")
 
 
 class AuthError(Exception):
     """A problem the user can fix. The message is safe to show on screen."""
+
+
+def validate_password(password):
+    """Raise AuthError unless a password has at least six ASCII letters or digits."""
+    if not password:
+        raise AuthError("Password is required.")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise AuthError("Password must be at least 6 characters long.")
+    if any(character.isspace() for character in password):
+        raise AuthError("Password cannot contain spaces.")
+    if not _PASSWORD_PATTERN.fullmatch(password):
+        raise AuthError(
+            "Password must contain letters and numbers only. "
+            "Special characters are not allowed."
+        )
 
 
 class Session:
@@ -77,14 +94,13 @@ def authenticate(username, password):
 def register_user(username, password, confirm):
     """Create an account or raise AuthError explaining what to fix."""
     username = username.strip()
-    if not username or not password:
-        raise AuthError("Username and password are required.")
+    if not username:
+        raise AuthError("Username is required.")
     if len(username) < MIN_USERNAME_LENGTH:
         raise AuthError(f"Username must be at least {MIN_USERNAME_LENGTH} characters.")
     if not username.replace("_", "").replace(".", "").isalnum():
         raise AuthError("Username may only contain letters, numbers, dots and underscores.")
-    if len(password) < MIN_PASSWORD_LENGTH:
-        raise AuthError(f"Password must be at least {MIN_PASSWORD_LENGTH} characters.")
+    validate_password(password)
     if password != confirm:
         raise AuthError("Passwords do not match.")
     if db.create_user(username, hash_password(password)) is None:
@@ -222,7 +238,7 @@ class RegisterPage(_AuthPage):
         self.username = self._entry(form, "USERNAME")
         self.password = self._entry(form, "PASSWORD", show="•")
         self.confirm = self._entry(form, "CONFIRM PASSWORD", show="•")
-        tk.Label(form, text=f"Use at least {MIN_PASSWORD_LENGTH} characters for the password.",
+        tk.Label(form, text="Use at least 6 letters and numbers; no spaces or symbols.",
                  font=font(9), bg=COLORS["surface"], fg=COLORS["text_muted"], anchor="w").pack(fill="x")
         self._error_label(form)
         AppButton(form, "CREATE ACCOUNT", self.submit, large=True).pack(fill="x", pady=(10, 0))

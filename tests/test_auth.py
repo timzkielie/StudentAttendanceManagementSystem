@@ -33,6 +33,36 @@ class TestRegisterUser(unittest.TestCase):
         with self.assertRaises(auth.AuthError):
             auth.register_user("crizti", "123", "123")
 
+    def test_password_must_be_ascii_alphanumeric(self):
+        for password in ("hello@123", "student#1", "hello 123", "１２３４５６"):
+            with self.subTest(password=password):
+                with self.assertRaises(auth.AuthError):
+                    auth.register_user("crizti", password, password)
+
+    def test_blank_password_has_specific_error(self):
+        with self.assertRaisesRegex(auth.AuthError, "^Password is required\\.$"):
+            auth.register_user("crizti", "", "")
+
+    def test_short_password_has_specific_error(self):
+        with self.assertRaisesRegex(
+            auth.AuthError, "^Password must be at least 6 characters long\\.$"
+        ):
+            auth.register_user("crizti", "abc12", "abc12")
+
+    def test_special_character_has_specific_error(self):
+        with self.assertRaisesRegex(
+            auth.AuthError,
+            "^Password must contain letters and numbers only\\. "
+            "Special characters are not allowed\\.$",
+        ):
+            auth.register_user("crizti", "hello@123", "hello@123")
+
+    @patch("auth.db")
+    def test_password_with_letters_and_numbers_is_accepted(self, mock_db):
+        mock_db.create_user.return_value = 1
+        auth.register_user("crizti", "attend2026", "attend2026")
+        mock_db.create_user.assert_called_once()
+
     def test_mismatched_password_rejected(self):
         with self.assertRaises(auth.AuthError):
             auth.register_user("crizti", "secret1", "secret2")

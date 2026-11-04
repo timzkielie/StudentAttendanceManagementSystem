@@ -21,7 +21,8 @@ XAMPP defaults are used (user `root`, empty password). To change them set
 | `database.py` | `DatabaseManager` (Singleton): all SQL, the only file that talks to MySQL, plus automatic upgrades |
 | `auth.py` | Password hashing, sign-in/sign-up rules, Login and Register screens |
 | `dashboard.py` | Totals, today's attendance, calendar |
-| `add_students.py` | Student management: add, edit, search, delete |
+| `add_students.py` | Student management: add, edit, search, delete, and preview/import student files |
+| `student_import.py` | Flexible CSV/XLSX header detection and import validation |
 | `attendance.py` | Mark attendance for a class and date |
 | `reports.py` | Reports by class, by date, by student + CSV export |
 | `assets/` | `theme.py` (colours), `widgets.py` (buttons, tables...), `illustrations.py` (artwork) |
@@ -36,6 +37,22 @@ Each user sees only the students they created. Their course and section lists,
 attendance, dashboard totals, and reports are scoped to that same ownership.
 Student IDs remain globally unique, and duplicate-ID messages do not reveal
 which account owns an existing ID.
+
+## Bulk student import
+On the Students page, choose **UPLOAD STUDENT LIST** to select a CSV or Excel
+(`.xlsx`) file. Column headings and order are detected automatically; double-click
+a recognized field in the mapping list to change it or ignore an unused column.
+Review all rows and validation messages before confirming. Student inserts run
+in a database transaction. **EXCEL TEMPLATE** and **CSV TEMPLATE** save sample
+files that can be used as starting points, but the templates are optional.
+
+The app adds nullable columns for optional contact/profile information to the
+existing `students` table on startup. It does not create another student table
+or change attendance records. Install dependencies with
+`python -m pip install -r requirements.txt` if they are not already available.
+
+Account passwords must contain at least six ASCII letters or digits, with no
+spaces or symbols. Passwords continue to be stored as salted PBKDF2 hashes.
 
 ## 2.6 Student ownership
 `students.user_id` identifies the account that owns a student. The column is

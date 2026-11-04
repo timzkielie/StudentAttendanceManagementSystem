@@ -44,7 +44,17 @@ class TestDatabaseUserIsolation(unittest.TestCase):
                 fullname TEXT NOT NULL,
                 course TEXT NOT NULL,
                 section TEXT NOT NULL,
-                user_id INTEGER
+                user_id INTEGER,
+                email TEXT,
+                mobile_number TEXT,
+                age INTEGER,
+                birth_date DATE,
+                gender TEXT,
+                year_level TEXT,
+                modality TEXT,
+                address TEXT,
+                guardian_name TEXT,
+                guardian_contact_number TEXT
             );
             CREATE TABLE attendance (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,7 +67,9 @@ class TestDatabaseUserIsolation(unittest.TestCase):
                     ON DELETE CASCADE ON UPDATE CASCADE
             );
             INSERT INTO users VALUES (1, 'user_a'), (2, 'user_b');
-            INSERT INTO students VALUES ('A-1', 'Alice Student', 'BSIT', 'A', 1);
+            INSERT INTO students
+                (student_id, fullname, course, section, user_id)
+                VALUES ('A-1', 'Alice Student', 'BSIT', 'A', 1);
             INSERT INTO attendance (student_id, status, attendance_date, attendance_time)
                 VALUES ('A-1', 'PRESENT', '2026-10-31', '08:00:00');
         """)
@@ -136,6 +148,41 @@ class TestDatabaseUserIsolation(unittest.TestCase):
             self.db.get_student_counts("A-1", 1),
             {"present": 1, "late": 0, "absent": 0},
         )
+
+    def test_bulk_import_is_owner_scoped_and_skips_duplicate_ids(self):
+        record = {
+            "student_id": "B-1",
+            "fullname": "Zoë Student",
+            "course": "BSIT",
+            "section": "B",
+            "email": "zoe@example.com",
+            "mobile_number": None,
+            "age": 20,
+            "birth_date": None,
+            "gender": None,
+            "year_level": "2nd Year",
+            "modality": None,
+            "address": None,
+            "guardian_name": None,
+            "guardian_contact_number": None,
+        }
+        imported, duplicates = self.db.add_students_bulk([record, record], 2)
+
+        self.assertEqual((imported, duplicates), (1, 1))
+        self.assertEqual(
+            self.db.get_student("B-1", 2),
+            {
+                "student_id": "B-1",
+                "fullname": "Zoë Student",
+                "course": "BSIT",
+                "section": "B",
+            },
+        )
+        self.assertIsNone(self.db.get_student("B-1", 1))
+        saved = self.connection.execute(
+            "SELECT email, age, user_id FROM students WHERE student_id = 'B-1'"
+        ).fetchone()
+        self.assertEqual(tuple(saved), ("zoe@example.com", 20, 2))
 
 
 if __name__ == "__main__":
